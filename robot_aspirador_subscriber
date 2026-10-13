@@ -1,0 +1,90 @@
+#include <chrono>
+#include <memory>
+
+#include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/msg/laser_scan.hpp"  // este é preciso no piublicador
+
+#include "geometry_msgs/msg/twist_stamped.hpp"
+
+using namespace std::chrono_literals;
+
+class RobotAspirador : public rclcpp::Node
+{
+public:
+  RobotAspirador()
+  : Node("robot_aspirador"), obstaculo_a_frente_(false)
+  {
+    // 1. PUBLICADOR: Envia ordens de movimento para as rodas (cmd_vel)
+    publisher_ = this->create_publisher<geometry_msgs::msg::TwistStamped>("cmd_vel", 10);
+
+    // 2. SUBSCRITOR: Ouve as leituras do sensor laser LiDAR (scan)
+    subscriber_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
+      "scan", 10, std::bind(&RobotAspirador::scan_callback, this, std::placeholders::_1));
+
+    // 3. TEMPORIZADOR: Decide e envia velocidades 10 vezes por segundo (a cada 100ms)
+    timer_ = this->create_wall_timer(
+      100ms, std::bind(&RobotAspirador::timer_callback, this));
+
+    RCLCPP_INFO(this->get_logger(), "Aspirador TurtleBot3 Iniciado! À procura de pó...");
+  }
+
+private:
+  // Função chamada sempre que o LaserScan envia dados novos
+  void scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg)
+  {
+    float distancia_minima = 100.0;
+
+    // Analisa os feixes da frente-esquerda (raios de 0 a 30 graus)
+    for (int i = 0; i <= 30; i++) {
+      if (msg->ranges[i] > 0.05 && msg->ranges[i] < distancia_minima) {
+        distancia_minima = msg->ranges[i];
+      }
+    }
+
+    // Analisa os feixes da frente-direita (raios de 330 a 359 graus)
+    for (int i = 330; i < 360; i++) {
+      if (msg->ranges[i] > 0.05 && msg->ranges[i] < distancia_minima) {
+        distancia_minima = msg->ranges[i];
+      }
+    }
+
+    // Se houver algum obstáculo a menos de 60 cm (0.6 metros), ativa o alarme!
+    obstaculo_a_frente_ = (distancia_minima < 0.6);
+  }
+
+  // Função que manda a ordem às rodas com base no que o laser viu
+  void timer_callback()
+  {
+    auto msg = geometry_msgs::msg::TwistStamped();
+    msg.header.stamp = this->now();
+    msg.header.frame_id = "base_link";
+
+    if (obstaculo_a_frente_) {
+      // PERIGO: Parede detetada! Trava para a frente e roda sobre si mesmo para a direita
+      msg.twist.linear.x = 0.0;
+      msg.twist.angular.z = -0.5;
+      RCLCPP_INFO(this->get_logger(), "Obstáculo detetado! A virar à direita...");
+    } else {
+      // LIVRE: Caminho desimpedido, anda para a frente a aspirar!
+      msg.twist.linear.x = 0.25;
+      msg.twist.angular.z = 0.0;
+    }
+
+    // Publica a ordem de velocidade para o cmd_vel
+    publisher_->publish(msg);
+  }
+
+  // Variáveis do nó
+  rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr publisher_;
+  rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr subscriber_;
+  rclcpp::TimerBase::SharedPtr timer_;
+  bool obstaculo_a_frente_;
+};
+
+int main(int argc, char * argv[])
+{
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<RobotAspirador>());
+  rclcpp::shutdown();
+  return 0;
+}
